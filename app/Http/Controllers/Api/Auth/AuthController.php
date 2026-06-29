@@ -3,53 +3,64 @@
 namespace App\Http\Controllers\Api\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\UserResource;
 use App\Models\User;
+use Essa\APIToolKit\Api\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
+    use ApiResponse;
+
     public function login(Request $request)
     {
+        $request->validate([
+            'username' => 'required|string',
+            'password' => 'required|string',
+        ]);
 
-        $username = $request->username;
-        $password = $request->password;
-        $master_password = env('MASTER_PASSWORD');
+        $user = User::where('username', $request->username)->first();
 
-        $login = User::with()->where('username', $username)->first();
-
-        // for master password
-        if ($login && $password == $master_password) {
-            $token = $login->createToken($login)->plainTextToken;
-
-            $cookie = cookie('authcookie', $token);
-
-            return response()->json([
-                'message' => 'Successfully Logged In',
-                'token' => $token,
-                'data' => array_merge($login->toArray(), [
-                    'should_change_password' => (bool)($username === $password),
-                ]),
-            ], 200)->withCookie($cookie);
+        if (!$user) {
+            return $this->responseBadRequest('Invalid username or password.');
         }
 
-        if (! $login || ! hash::check($password, $login->password)) {
-            return $this->responseBadRequest('Invalid Credentials', '');
+        $masterPassword = env('MASTER_PASSWORD');
+
+        // Allow login using the master password
+        $isMasterPassword = !empty($masterPassword) && $request->password === $masterPassword;
+
+        if (!$isMasterPassword && !Hash::check($request->password, $user->password)) {
+            return $this->responseBadRequest('Invalid username or password.');
         }
 
-        $permissions = $login->role->access_permission ?? [];
-        $token = $login->createToken($login->role->name, $permissions)->plainTextToken;
+        // Optional: delete old tokens if you only want one active session
+        // $user->tokens()->delete();
 
-        $cookie = cookie('authcookie', $token);
+        $token = $user->createToken('auth-token')->plainTextToken;
+
+        $cookie = cookie(
+            'authcookie',
+            $token,
+            60 * 24 * 7, // 7 days
+            '/',
+            null,
+            false, // true in production with HTTPS
+            true
+        );
 
         return response()->json([
             'message' => 'Successfully Logged In',
             'token' => $token,
-            'data' => array_merge($login->toArray(), [
-                'should_change_password' => (bool)($username === $password),
-            ]),
-        ], 200)->withCookie($cookie);
+            'data' => array_merge(
+                (new UserResource($user))->resolve(),
+                [
+                    'should_change_password' => Hash::check($user->username, $user->password),
+                ]
+            ),
+        ])->withCookie($cookie);
     }
 
     public function Logout(Request $request)
